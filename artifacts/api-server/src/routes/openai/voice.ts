@@ -1,15 +1,22 @@
 import { Router, type IRouter } from "express";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { db, conversations, messages } from "@workspace/db";
-import { voiceChatStream, ensureCompatibleFormat } from "@workspace/integrations-openai-ai-server/audio";
+import {
+  speechToText,
+  voiceChatStream,
+  ensureCompatibleFormat,
+} from "@workspace/integrations-openai-ai-server/audio";
 import {
   SendOpenaiVoiceMessageParams,
   SendOpenaiVoiceMessageBody,
 } from "@workspace/api-zod";
+import { requireAuth, type AuthedRequest } from "../../middlewares/requireAuth";
 
 const router: IRouter = Router();
 
-router.post("/openai/conversations/:id/voice-messages", async (req, res): Promise<void> => {
+router.post("/openai/conversations/:id/voice-messages", requireAuth, async (req, res): Promise<void> => {
+  const userId = (req as AuthedRequest).userId;
+
   const params = SendOpenaiVoiceMessageParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -24,7 +31,8 @@ router.post("/openai/conversations/:id/voice-messages", async (req, res): Promis
   const [conv] = await db
     .select()
     .from(conversations)
-    .where(eq(conversations.id, params.data.id));
+    .where(and(eq(conversations.id, params.data.id), eq(conversations.userId, userId)));
+
   if (!conv) {
     res.status(404).json({ error: "Conversation not found" });
     return;
@@ -34,21 +42,30 @@ router.post("/openai/conversations/:id/voice-messages", async (req, res): Promis
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
 
-  const audioBuffer = Buffer.from(body.data.audio, "base64");
-  const { buffer, format } = await ensureCompatibleFormat(audioBuffer);
-  const stream = await voiceChatStream(buffer, "alloy", format);
+  const rawAudioBuffer = Buffer.from(body.data.audio, "base64");
+  const { buffer: compatibleBuffer, format } = await ensureCompatibleFormat(rawAudioBuffer);
+
+  let userTranscript = "";
+  try {
+    userTranscript = await speechToText(compatibleBuffer, format);
+  } catch {
+    userTranscript = "[Voice message]";
+  }
+
+  res.write(`data: ${JSON.stringify({ type: "user_transcript", data: userTranscript })}\n\n`);
+
+  const stream = await voiceChatStream(compatibleBuffer, "alloy", format);
 
   let assistantTranscript = "";
-  let userTranscript = "";
 
   for await (const event of stream) {
     if (event.type === "transcript") {
       assistantTranscript += event.data;
+      res.write(`data: ${JSON.stringify({ type: "transcript", data: event.data })}\n\n`);
     }
-    if (event.type === "user_transcript") {
-      userTranscript += event.data;
+    if (event.type === "audio") {
+      res.write(`data: ${JSON.stringify({ type: "audio", data: event.data })}\n\n`);
     }
-    res.write(`data: ${JSON.stringify(event)}\n\n`);
   }
 
   await db.insert(messages).values([

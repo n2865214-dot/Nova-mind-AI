@@ -1,10 +1,11 @@
 import { Router, type IRouter } from "express";
 import { generateImageBuffer } from "@workspace/integrations-openai-ai-server/image";
 import { GenerateOpenaiImageBody } from "@workspace/api-zod";
+import { requireAuth } from "../../middlewares/requireAuth";
 
 const router: IRouter = Router();
 
-router.post("/openai/generate-image", async (req, res): Promise<void> => {
+router.post("/openai/generate-image", requireAuth, async (req, res): Promise<void> => {
   const parsed = GenerateOpenaiImageBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
@@ -22,8 +23,7 @@ router.post("/openai/generate-image", async (req, res): Promise<void> => {
       }[style] ?? prompt
     : prompt;
 
-  const imageSize = (size as "1024x1024" | "1536x1024" | "1024x1536") ?? "1024x1024";
-
+  const imageSize: "1024x1024" = "1024x1024";
   const buffer = await generateImageBuffer(stylePrompt, imageSize);
   res.json({ b64_json: buffer.toString("base64"), prompt });
 });
