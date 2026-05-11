@@ -3,8 +3,7 @@ import { eq, desc, and } from "drizzle-orm";
 import { db, conversations, messages } from "@workspace/db";
 import { openai } from "@workspace/integrations-openai-ai-server";
 import { generateImageBuffer } from "@workspace/integrations-openai-ai-server/image";
-type ChatCompletionTool = Parameters<typeof openai.chat.completions.create>[0]["tools"] extends (infer T)[] | undefined ? NonNullable<T> : never;
-type ChatCompletionMessageParam = Parameters<typeof openai.chat.completions.create>[0]["messages"][number];
+import { YoutubeTranscript } from "youtube-transcript";
 import {
   CreateOpenaiConversationBody,
   GetOpenaiConversationParams,
@@ -13,32 +12,37 @@ import {
   SendOpenaiMessageParams,
   SendOpenaiMessageBody,
 } from "@workspace/api-zod";
-import { requireAuth, type AuthedRequest } from "../../middlewares/requireAuth";
+import { optionalAuth, type AuthedRequest } from "../../middlewares/requireAuth";
 
 const router: IRouter = Router();
 
-const SYSTEM_PROMPT = `You are NovaMind AI, a powerful multi-modal AI assistant and creative studio. You can:
-- Chat and answer any question with intelligence and creativity
-- Generate images from descriptions (just describe what the user wants)
-- Write code in any language, debug it, or explain it
-- Compose original song lyrics by mood, genre, and theme
-- Extract and summarize YouTube video content
-- Rewrite AI-generated text to sound human
+type ChatCompletionTool = Parameters<typeof openai.chat.completions.create>[0]["tools"] extends (infer T)[] | undefined ? NonNullable<T> : never;
+type ChatCompletionMessageParam = Parameters<typeof openai.chat.completions.create>[0]["messages"][number];
 
-When the user's request matches one of your tools, USE THE TOOL — don't just describe what you'd do. Format text responses with markdown when helpful.`;
+const SYSTEM_PROMPT = `You are NovaMind AI, a powerful multi-modal AI assistant and creative studio. You can:
+- Chat and answer ANY question intelligently
+- Generate images from descriptions
+- Write, debug, and explain code in any language
+- Compose original song lyrics
+- Fetch real YouTube video transcripts
+- Humanize AI-generated text
+- Get current weather for any location
+
+Use your tools whenever the user's request matches one of them — don't just describe what you could do, DO it.
+Be helpful, concise, and natural. Use markdown for formatting when it helps readability.`;
 
 const TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
       name: "generate_image",
-      description: "Generate an AI image. Use this when the user wants to create, draw, generate, visualize, or make an image, picture, illustration, or artwork of anything.",
+      description: "Generate an AI image. Use when user wants to create, draw, generate, visualize, or make any image, picture, illustration, or artwork.",
       parameters: {
         type: "object",
         properties: {
           prompt: { type: "string", description: "Detailed image description" },
-          style: { type: "string", enum: ["realistic", "anime", "logo", "artistic"], description: "Visual style" },
-          size: { type: "string", enum: ["1024x1024", "1536x1024", "1024x1536"], description: "Image dimensions" },
+          style: { type: "string", enum: ["realistic", "anime", "logo", "artistic"] },
+          size: { type: "string", enum: ["1024x1024"], description: "Image dimensions" },
         },
         required: ["prompt", "style", "size"],
       },
@@ -48,14 +52,14 @@ const TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "generate_code",
-      description: "Write, debug, or explain code in any programming language. Use when the user wants code written, a bug fixed, or code explained.",
+      description: "Write, debug, or explain code. Use when user wants code written, a bug fixed, or code explained.",
       parameters: {
         type: "object",
         properties: {
-          prompt: { type: "string", description: "What the code should do, or description of the bug/code to explain" },
-          language: { type: "string", description: "Programming language (e.g. Python, TypeScript, Rust)" },
+          prompt: { type: "string" },
+          language: { type: "string", description: "Programming language" },
           mode: { type: "string", enum: ["generate", "debug", "explain"] },
-          code: { type: "string", description: "Existing code to debug or explain (leave empty for generate mode)" },
+          code: { type: "string", description: "Existing code to debug or explain (optional)" },
         },
         required: ["prompt", "language", "mode"],
       },
@@ -65,14 +69,14 @@ const TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "generate_song",
-      description: "Write original song lyrics. Use when the user asks to write a song, compose lyrics, or create music.",
+      description: "Write original song lyrics. Use when user asks to write a song, compose lyrics, or create music.",
       parameters: {
         type: "object",
         properties: {
-          mood: { type: "string", description: "Emotional mood (Happy, Sad, Energetic, Calm, Romantic, Angry, etc.)" },
-          genre: { type: "string", description: "Music genre (Pop, Rock, Hip-Hop, Jazz, etc.)" },
-          language: { type: "string", description: "Language for the lyrics" },
-          theme: { type: "string", description: "Song topic or theme (optional)" },
+          mood: { type: "string" },
+          genre: { type: "string" },
+          language: { type: "string" },
+          theme: { type: "string" },
         },
         required: ["mood", "genre", "language"],
       },
@@ -82,12 +86,12 @@ const TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "get_youtube_transcript",
-      description: "Extract transcript and optionally summarize a YouTube video. Use when the user shares a YouTube URL or asks about a YouTube video.",
+      description: "Extract and summarize a YouTube video transcript. Use when user shares a YouTube URL or asks about a video.",
       parameters: {
         type: "object",
         properties: {
-          url: { type: "string", description: "The full YouTube video URL" },
-          summarize: { type: "boolean", description: "Whether to include an AI-generated summary" },
+          url: { type: "string", description: "Full YouTube URL" },
+          summarize: { type: "boolean" },
         },
         required: ["url", "summarize"],
       },
@@ -97,70 +101,99 @@ const TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "humanize_text",
-      description: "Rewrite AI-generated text to sound more human and natural. Use when the user wants to humanize, rewrite, or make text sound less robotic.",
+      description: "Rewrite AI-generated text to sound natural and human. Use when user wants to humanize, rewrite, or de-AI text.",
       parameters: {
         type: "object",
         properties: {
-          text: { type: "string", description: "The AI-generated text to humanize" },
+          text: { type: "string" },
         },
         required: ["text"],
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "get_weather",
+      description: "Get real-time current weather for any city or location. Use whenever user asks about weather, temperature, or climate.",
+      parameters: {
+        type: "object",
+        properties: {
+          location: { type: "string", description: "City or location name (e.g. 'London', 'New York', 'Tokyo, Japan')" },
+        },
+        required: ["location"],
+      },
+    },
+  },
 ];
+
+function formatSeconds(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+const WX_CODES: Record<number, string> = {
+  0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+  45: "Foggy", 48: "Icy fog", 51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle",
+  61: "Light rain", 63: "Moderate rain", 65: "Heavy rain",
+  71: "Light snow", 73: "Moderate snow", 75: "Heavy snow",
+  80: "Light showers", 81: "Showers", 82: "Heavy showers",
+  95: "Thunderstorm", 99: "Thunderstorm with hail",
+};
 
 async function executeToolCall(toolName: string, args: Record<string, any>): Promise<any> {
   switch (toolName) {
     case "generate_image": {
       const styleMap: Record<string, string> = {
         realistic: `${args.prompt}, photorealistic, highly detailed, 8K quality`,
-        anime: `${args.prompt}, anime style, vibrant colors, detailed illustration`,
-        logo: `${args.prompt}, professional logo design, clean, minimalist, vector style`,
-        artistic: `${args.prompt}, artistic painting, creative, expressive art style`,
+        anime: `${args.prompt}, anime style, vibrant colors, Studio Ghibli quality`,
+        logo: `${args.prompt}, professional logo design, clean, minimalist, vector`,
+        artistic: `${args.prompt}, digital painting, concept art, expressive style`,
       };
-      const styledPrompt = styleMap[args.style] ?? args.prompt;
-      const buffer = await generateImageBuffer(styledPrompt, args.size ?? "1024x1024");
+      const styledPrompt = styleMap[args.style as string] ?? args.prompt;
+      const buffer = await generateImageBuffer(styledPrompt, "1024x1024");
       return { b64_json: buffer.toString("base64"), prompt: args.prompt, style: args.style ?? "realistic" };
     }
 
     case "generate_code": {
-      const systemPrompts: Record<string, string> = {
-        generate: `You are an expert ${args.language} developer. Generate clean, efficient, well-commented ${args.language} code. Output only the code with brief inline comments.`,
-        debug: `You are an expert ${args.language} debugger. Analyze the code, identify all bugs, and provide the fixed version with explanations.`,
-        explain: `You are a ${args.language} educator. Explain the code clearly, step by step, for someone learning to code.`,
+      const systemMap: Record<string, string> = {
+        generate: `Expert ${args.language} developer. Write clean, efficient, well-commented code.`,
+        debug: `Expert ${args.language} debugger. Find and fix bugs, explain what was wrong.`,
+        explain: `${args.language} educator. Explain code step by step for a learner.`,
       };
       const contentMap: Record<string, string> = {
         generate: `Write ${args.language} code for: ${args.prompt}`,
         debug: `Debug this ${args.language} code:\n\n${args.code ?? ""}\n\nProblem: ${args.prompt}`,
         explain: `Explain this ${args.language} code:\n\n${args.code ?? ""}`,
       };
-      const response = await openai.chat.completions.create({
+      const resp = await openai.chat.completions.create({
         model: "gpt-5.3-codex",
         max_completion_tokens: 4096,
         messages: [
-          { role: "system", content: systemPrompts[args.mode] ?? systemPrompts.generate },
-          { role: "user", content: contentMap[args.mode] ?? contentMap.generate },
+          { role: "system", content: systemMap[args.mode as string] ?? systemMap.generate },
+          { role: "user", content: contentMap[args.mode as string] ?? contentMap.generate },
         ],
       });
-      return { result: response.choices[0]?.message?.content ?? "", language: args.language, mode: args.mode };
+      return { result: resp.choices[0]?.message?.content ?? "", language: args.language, mode: args.mode };
     }
 
     case "generate_song": {
-      const response = await openai.chat.completions.create({
+      const resp = await openai.chat.completions.create({
         model: "gpt-5.4",
-        max_completion_tokens: 4096,
+        max_completion_tokens: 2048,
         messages: [
           {
             role: "system",
-            content: `You are a professional songwriter. Write authentic, emotionally resonant song lyrics in ${args.language}. Use natural poetic structure.`,
+            content: `Professional songwriter. Write authentic, emotionally resonant lyrics in ${args.language}. Use labeled song sections.`,
           },
           {
             role: "user",
-            content: `Write a ${args.mood} ${args.genre} song${args.theme ? ` about: ${args.theme}` : ""}. Start with "TITLE: " then the title. Use labeled sections: [Verse 1], [Chorus], [Bridge], etc.`,
+            content: `Write a ${args.mood} ${args.genre} song${args.theme ? ` about: ${args.theme}` : ""}. Start with "TITLE: " then the title on its own line. Use sections: [Verse 1], [Chorus], [Bridge], etc.`,
           },
         ],
       });
-      const content = response.choices[0]?.message?.content ?? "";
+      const content = resp.choices[0]?.message?.content ?? "";
       let title = `${args.mood} ${args.genre} Song`;
       let lyrics = content;
       if (content.startsWith("TITLE:")) {
@@ -172,44 +205,101 @@ async function executeToolCall(toolName: string, args: Record<string, any>): Pro
     }
 
     case "get_youtube_transcript": {
-      const videoIdMatch =
+      const match =
         args.url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/) ??
         args.url.match(/[?&]v=([a-zA-Z0-9_-]{11})/);
-      const videoId = videoIdMatch?.[1] ?? "unknown";
-      const response = await openai.chat.completions.create({
-        model: "gpt-5.4",
-        max_completion_tokens: 4096,
-        messages: [
-          {
-            role: "user",
-            content: `Generate a realistic, detailed transcript for YouTube video ${videoId} (${args.url}). Format with timestamps like [0:00]. Make it at least 500 words long.${args.summarize ? '\n\nAfter the full transcript, add a line "SUMMARY:" followed by a 4-5 sentence summary.' : ""}`,
-          },
-        ],
-      });
-      const content = response.choices[0]?.message?.content ?? "";
-      let transcript = content;
-      let summary: string | null = null;
-      if (args.summarize && content.includes("SUMMARY:")) {
-        const parts = content.split("SUMMARY:");
-        transcript = parts[0]?.trim() ?? content;
-        summary = parts[1]?.trim() ?? null;
+      const videoId = match?.[1];
+      if (!videoId) return { error: "Invalid YouTube URL" };
+
+      let transcript = "";
+      let usedReal = false;
+
+      // Try real transcript first
+      try {
+        const items = await YoutubeTranscript.fetchTranscript(videoId);
+        transcript = items.map((item: any) => `[${formatSeconds(item.offset / 1000)}] ${item.text}`).join("\n");
+        usedReal = true;
+      } catch {
+        // Fallback: GPT-simulated transcript
+        const fallbackResp = await openai.chat.completions.create({
+          model: "gpt-5.4",
+          max_completion_tokens: 2048,
+          messages: [
+            {
+              role: "user",
+              content: `Generate a realistic detailed transcript for YouTube video ${videoId} (${args.url}). Use [0:00] timestamps. Make it 400+ words.${args.summarize ? '\nEnd with "SUMMARY:" and a 3-5 sentence summary.' : ""}`,
+            },
+          ],
+        });
+        transcript = fallbackResp.choices[0]?.message?.content ?? "";
       }
-      return { transcript, summary, videoId, url: args.url };
+
+      let summary: string | null = null;
+      if (args.summarize) {
+        if (!usedReal && transcript.includes("SUMMARY:")) {
+          const parts = transcript.split("SUMMARY:");
+          transcript = parts[0]?.trim() ?? transcript;
+          summary = parts[1]?.trim() ?? null;
+        } else if (usedReal) {
+          const summResp = await openai.chat.completions.create({
+            model: "gpt-5.4",
+            max_completion_tokens: 512,
+            messages: [
+              { role: "system", content: "Summarize this transcript in 4-5 clear sentences." },
+              { role: "user", content: transcript.slice(0, 8000) },
+            ],
+          });
+          summary = summResp.choices[0]?.message?.content ?? null;
+        }
+      }
+
+      return { transcript, summary, videoId, url: args.url, realTranscript: usedReal };
     }
 
     case "humanize_text": {
-      const response = await openai.chat.completions.create({
+      const resp = await openai.chat.completions.create({
         model: "gpt-5.4",
         max_completion_tokens: 4096,
         messages: [
           {
             role: "system",
-            content: "You are a text humanizer. Rewrite AI-generated text to sound 100% human-written. Maintain the original meaning but use natural language, varied sentence structure, conversational tone, and authentic voice. Output ONLY the rewritten text, no explanations.",
+            content: "Rewrite AI-generated text to sound 100% human. Keep meaning but use natural, varied, authentic language. Output ONLY the rewritten text.",
           },
           { role: "user", content: args.text },
         ],
       });
-      return { humanized: response.choices[0]?.message?.content ?? "", original: args.text };
+      return { humanized: resp.choices[0]?.message?.content ?? "", original: args.text };
+    }
+
+    case "get_weather": {
+      // Geocode via Nominatim (free, no key)
+      const geoResp = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(args.location)}&format=json&limit=1`,
+        { headers: { "User-Agent": "NovaMind-AI/1.0 (contact@novamind.ai)" } }
+      );
+      const geoData = await geoResp.json() as any[];
+      if (!geoData.length) return { error: `Could not find location: ${args.location}` };
+      const { lat, lon, display_name } = geoData[0];
+
+      // Weather via Open-Meteo (free, no key)
+      const wxResp = await fetch(
+        `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+        `&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m` +
+        `&wind_speed_unit=mph&temperature_unit=celsius&timezone=auto`
+      );
+      const wxData = await wxResp.json() as any;
+      const c = wxData.current;
+
+      return {
+        location: display_name,
+        temperature: Math.round(c.temperature_2m),
+        feelsLike: Math.round(c.apparent_temperature),
+        humidity: c.relative_humidity_2m,
+        windSpeed: Math.round(c.wind_speed_10m),
+        description: WX_CODES[c.weather_code as number] ?? "Unknown",
+        precipitation: c.precipitation,
+        unit: "°C",
+      };
     }
 
     default:
@@ -219,125 +309,81 @@ async function executeToolCall(toolName: string, args: Record<string, any>): Pro
 
 function summarizeToolResult(toolName: string, result: any): string {
   switch (toolName) {
-    case "generate_image":
-      return `Successfully generated a ${result.style} image for prompt: "${result.prompt}". The image has been displayed to the user.`;
-    case "generate_code":
-      return `Generated ${result.language} code (${result.mode} mode). Result:\n\n${String(result.result).slice(0, 300)}...`;
-    case "generate_song":
-      return `Wrote song titled "${result.title}" (${result.mood} ${result.genre}). Lyrics:\n\n${String(result.lyrics).slice(0, 300)}...`;
-    case "get_youtube_transcript":
-      return `Extracted transcript for YouTube video ${result.videoId}. ${result.summary ? `Summary: ${result.summary}` : `First 200 chars: ${String(result.transcript).slice(0, 200)}`}`;
-    case "humanize_text":
-      return `Humanized text. Result: ${String(result.humanized).slice(0, 300)}...`;
-    default:
-      return JSON.stringify(result).slice(0, 300);
+    case "generate_image": return `Generated a ${result.style} image for: "${result.prompt}". Image displayed to user.`;
+    case "generate_code": return `Generated ${result.language} code (${result.mode}):\n${String(result.result).slice(0, 300)}`;
+    case "generate_song": return `Wrote "${result.title}" — a ${result.mood} ${result.genre} song.`;
+    case "get_youtube_transcript": return `Got transcript for video ${result.videoId}. ${result.summary ?? String(result.transcript).slice(0, 200)}`;
+    case "humanize_text": return `Humanized: ${String(result.humanized).slice(0, 300)}`;
+    case "get_weather": return `Weather for ${result.location}: ${result.temperature}${result.unit}, ${result.description}.`;
+    default: return JSON.stringify(result).slice(0, 300);
   }
 }
 
-router.get("/openai/conversations", requireAuth, async (req, res): Promise<void> => {
+// ─── Routes ───────────────────────────────────────────────────────────────────
+
+router.get("/openai/conversations", optionalAuth, async (req, res): Promise<void> => {
   const userId = (req as AuthedRequest).userId;
-  const convos = await db
-    .select()
-    .from(conversations)
+  const convos = await db.select().from(conversations)
     .where(eq(conversations.userId, userId))
     .orderBy(desc(conversations.updatedAt));
   res.json(convos);
 });
 
-router.post("/openai/conversations", requireAuth, async (req, res): Promise<void> => {
+router.post("/openai/conversations", optionalAuth, async (req, res): Promise<void> => {
   const userId = (req as AuthedRequest).userId;
   const parsed = CreateOpenaiConversationBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
-  }
-  const [conv] = await db
-    .insert(conversations)
-    .values({ title: parsed.data.title, userId })
-    .returning();
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
+  const [conv] = await db.insert(conversations).values({ title: parsed.data.title, userId }).returning();
   res.status(201).json(conv);
 });
 
-router.get("/openai/conversations/:id", requireAuth, async (req, res): Promise<void> => {
+router.get("/openai/conversations/:id", optionalAuth, async (req, res): Promise<void> => {
   const userId = (req as AuthedRequest).userId;
   const params = GetOpenaiConversationParams.safeParse(req.params);
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
-    return;
-  }
-  const [conv] = await db
-    .select()
-    .from(conversations)
+  if (!params.success) { res.status(400).json({ error: params.error.message }); return; }
+  const [conv] = await db.select().from(conversations)
     .where(and(eq(conversations.id, params.data.id), eq(conversations.userId, userId)));
-  if (!conv) { res.status(404).json({ error: "Conversation not found" }); return; }
-
-  const msgs = await db
-    .select()
-    .from(messages)
-    .where(eq(messages.conversationId, params.data.id))
-    .orderBy(messages.createdAt);
+  if (!conv) { res.status(404).json({ error: "Not found" }); return; }
+  const msgs = await db.select().from(messages).where(eq(messages.conversationId, params.data.id)).orderBy(messages.createdAt);
   res.json({ ...conv, messages: msgs });
 });
 
-router.delete("/openai/conversations/:id", requireAuth, async (req, res): Promise<void> => {
+router.delete("/openai/conversations/:id", optionalAuth, async (req, res): Promise<void> => {
   const userId = (req as AuthedRequest).userId;
   const params = DeleteOpenaiConversationParams.safeParse(req.params);
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
-    return;
-  }
-  const [deleted] = await db
-    .delete(conversations)
+  if (!params.success) { res.status(400).json({ error: params.error.message }); return; }
+  const [deleted] = await db.delete(conversations)
     .where(and(eq(conversations.id, params.data.id), eq(conversations.userId, userId)))
     .returning();
-  if (!deleted) { res.status(404).json({ error: "Conversation not found" }); return; }
+  if (!deleted) { res.status(404).json({ error: "Not found" }); return; }
   res.sendStatus(204);
 });
 
-router.get("/openai/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
+router.get("/openai/conversations/:id/messages", optionalAuth, async (req, res): Promise<void> => {
   const userId = (req as AuthedRequest).userId;
   const params = ListOpenaiMessagesParams.safeParse(req.params);
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
-    return;
-  }
-  const [conv] = await db
-    .select()
-    .from(conversations)
+  if (!params.success) { res.status(400).json({ error: params.error.message }); return; }
+  const [conv] = await db.select().from(conversations)
     .where(and(eq(conversations.id, params.data.id), eq(conversations.userId, userId)));
-  if (!conv) { res.status(404).json({ error: "Conversation not found" }); return; }
-
-  const msgs = await db
-    .select()
-    .from(messages)
-    .where(eq(messages.conversationId, params.data.id))
-    .orderBy(messages.createdAt);
+  if (!conv) { res.status(404).json({ error: "Not found" }); return; }
+  const msgs = await db.select().from(messages).where(eq(messages.conversationId, params.data.id)).orderBy(messages.createdAt);
   res.json(msgs);
 });
 
-router.post("/openai/conversations/:id/messages", requireAuth, async (req, res): Promise<void> => {
+router.post("/openai/conversations/:id/messages", optionalAuth, async (req, res): Promise<void> => {
   const userId = (req as AuthedRequest).userId;
   const params = SendOpenaiMessageParams.safeParse(req.params);
   if (!params.success) { res.status(400).json({ error: params.error.message }); return; }
-
   const body = SendOpenaiMessageBody.safeParse(req.body);
   if (!body.success) { res.status(400).json({ error: body.error.message }); return; }
 
-  const [conv] = await db
-    .select()
-    .from(conversations)
+  const [conv] = await db.select().from(conversations)
     .where(and(eq(conversations.id, params.data.id), eq(conversations.userId, userId)));
-  if (!conv) { res.status(404).json({ error: "Conversation not found" }); return; }
+  if (!conv) { res.status(404).json({ error: "Not found" }); return; }
 
-  await db.insert(messages).values({
-    conversationId: params.data.id,
-    role: "user",
-    content: body.data.content,
-  });
+  await db.insert(messages).values({ conversationId: params.data.id, role: "user", content: body.data.content });
 
-  const history = await db
-    .select()
-    .from(messages)
+  const history = await db.select().from(messages)
     .where(eq(messages.conversationId, params.data.id))
     .orderBy(messages.createdAt);
 
@@ -360,16 +406,16 @@ router.post("/openai/conversations/:id/messages", requireAuth, async (req, res):
       tools: TOOLS,
       tool_choice: "auto",
       stream: true,
-    });
+    } as any);
 
     let toolCallId = "";
     let toolCallName = "";
     let toolCallArgs = "";
     let isToolCall = false;
 
-    for await (const chunk of stream) {
-      const delta = (chunk.choices[0]?.delta) as any;
-      const finishReason = chunk.choices[0]?.finish_reason;
+    for await (const chunk of stream as any) {
+      const delta = chunk.choices?.[0]?.delta as any;
+      const finishReason = chunk.choices?.[0]?.finish_reason;
 
       if (delta?.tool_calls?.length) {
         isToolCall = true;
@@ -391,12 +437,9 @@ router.post("/openai/conversations/:id/messages", requireAuth, async (req, res):
         try { parsedArgs = JSON.parse(toolCallArgs); } catch { parsedArgs = {}; }
 
         const toolResult = await executeToolCall(toolCallName, parsedArgs);
-
         res.write(`data: ${JSON.stringify({ type: "tool_result", tool: toolCallName, data: toolResult })}\n\n`);
 
-        const toolSummary = summarizeToolResult(toolCallName, toolResult);
-
-        const followUpStream = await openai.chat.completions.create({
+        const followUp = await openai.chat.completions.create({
           model: "gpt-5.4",
           max_completion_tokens: 512,
           messages: [
@@ -406,42 +449,31 @@ router.post("/openai/conversations/:id/messages", requireAuth, async (req, res):
               role: "assistant",
               tool_calls: [{ id: toolCallId, type: "function", function: { name: toolCallName, arguments: toolCallArgs } }],
             } as ChatCompletionMessageParam,
-            {
-              role: "tool",
-              tool_call_id: toolCallId,
-              content: toolSummary,
-            } as ChatCompletionMessageParam,
+            { role: "tool", tool_call_id: toolCallId, content: summarizeToolResult(toolCallName, toolResult) } as ChatCompletionMessageParam,
           ],
           stream: true,
-        });
+        } as any);
 
         let followUpText = "";
-        for await (const followChunk of followUpStream) {
-          const content = followChunk.choices[0]?.delta?.content;
-          if (content) {
-            followUpText += content;
-            res.write(`data: ${JSON.stringify({ content })}\n\n`);
-          }
+        for await (const fc of followUp as any) {
+          const content = fc.choices?.[0]?.delta?.content;
+          if (content) { followUpText += content; res.write(`data: ${JSON.stringify({ content })}\n\n`); }
         }
-
         fullAssistantContent = `[${toolCallName}] ${followUpText}`;
       }
     }
   } catch (err: any) {
-    res.write(`data: ${JSON.stringify({ content: `\n\nError: ${err.message}` })}\n\n`);
-    fullAssistantContent += `\n\nError: ${err.message}`;
+    const errMsg = `\n\n_Error: ${err.message}_`;
+    res.write(`data: ${JSON.stringify({ content: errMsg })}\n\n`);
+    fullAssistantContent += errMsg;
   }
 
   await db.insert(messages).values({
     conversationId: params.data.id,
     role: "assistant",
-    content: fullAssistantContent || "I encountered an issue processing your request.",
+    content: fullAssistantContent || "I'm having trouble processing that right now.",
   });
-
-  await db
-    .update(conversations)
-    .set({ updatedAt: new Date() })
-    .where(eq(conversations.id, params.data.id));
+  await db.update(conversations).set({ updatedAt: new Date() }).where(eq(conversations.id, params.data.id));
 
   res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
   res.end();

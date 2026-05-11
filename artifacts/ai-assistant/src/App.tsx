@@ -8,7 +8,7 @@ import { shadcn } from "@clerk/themes";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
-import { Menu, Plus, MessageSquare, Image as ImageIcon, FileText, Youtube, Code, Music, X, LogOut, User } from "lucide-react";
+import { Menu, MessageSquare, Image as ImageIcon, FileText, Youtube, Code, Music, X, LogOut, User, Lock, Sparkles } from "lucide-react";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import {
   DropdownMenu,
@@ -17,6 +17,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Badge } from "@/components/ui/badge";
 
 import NotFound from "@/pages/not-found";
 import ChatPage from "./pages/chat";
@@ -28,20 +29,16 @@ import SongGeneratorPage from "./pages/song-generator";
 import LandingPage from "./pages/landing";
 
 const queryClient = new QueryClient();
-
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 const clerkPubKey = publishableKeyFromHost(
   window.location.hostname,
   import.meta.env.VITE_CLERK_PUBLISHABLE_KEY,
 );
-
 const clerkProxyUrl = import.meta.env.VITE_CLERK_PROXY_URL;
 
 function stripBase(path: string): string {
-  return basePath && path.startsWith(basePath)
-    ? path.slice(basePath.length) || "/"
-    : path;
+  return basePath && path.startsWith(basePath) ? path.slice(basePath.length) || "/" : path;
 }
 
 const clerkAppearance = {
@@ -97,18 +94,14 @@ function ClerkQueryClientCacheInvalidator() {
   const { addListener } = useClerk();
   const qc = useQueryClient();
   const prevUserIdRef = useRef<string | null | undefined>(undefined);
-
   useEffect(() => {
     const unsubscribe = addListener(({ user }) => {
       const userId = user?.id ?? null;
-      if (prevUserIdRef.current !== undefined && prevUserIdRef.current !== userId) {
-        qc.clear();
-      }
+      if (prevUserIdRef.current !== undefined && prevUserIdRef.current !== userId) qc.clear();
       prevUserIdRef.current = userId;
     });
     return unsubscribe;
   }, [addListener, qc]);
-
   return null;
 }
 
@@ -117,23 +110,40 @@ function UserMenuButton() {
   const { signOut } = useClerk();
   const [, setLocation] = useLocation();
 
+  if (!user) {
+    return (
+      <div className="space-y-2 px-2">
+        <Link href="/sign-in">
+          <Button className="w-full h-9 text-sm bg-primary hover:bg-primary/90" size="sm">
+            Sign in
+          </Button>
+        </Link>
+        <Link href="/sign-up">
+          <Button variant="outline" className="w-full h-9 text-sm" size="sm">
+            Create account
+          </Button>
+        </Link>
+      </div>
+    );
+  }
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" size="sm" className="flex items-center gap-2 w-full justify-start px-3 py-2">
-          {user?.imageUrl ? (
+          {user.imageUrl ? (
             <img src={user.imageUrl} className="w-7 h-7 rounded-full object-cover" alt={user.fullName ?? "User"} />
           ) : (
             <div className="w-7 h-7 rounded-full bg-primary/20 flex items-center justify-center">
               <User className="w-4 h-4 text-primary" />
             </div>
           )}
-          <span className="text-sm truncate max-w-[120px]">{user?.firstName ?? user?.emailAddresses[0]?.emailAddress ?? "Account"}</span>
+          <span className="text-sm truncate max-w-[120px]">{user.firstName ?? user.emailAddresses[0]?.emailAddress ?? "Account"}</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-48">
         <div className="px-3 py-2 text-xs text-muted-foreground truncate">
-          {user?.emailAddresses[0]?.emailAddress}
+          {user.emailAddresses[0]?.emailAddress}
         </div>
         <DropdownMenuSeparator />
         <DropdownMenuItem
@@ -149,36 +159,61 @@ function UserMenuButton() {
 }
 
 function AppLayout({ children }: { children: React.ReactNode }) {
+  const { user } = useUser();
   const [location] = useLocation();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
-  const navItems = [
-    { href: "/chat", label: "Chat", icon: MessageSquare },
-    { href: "/image-generator", label: "Image Generator", icon: ImageIcon },
-    { href: "/text-humanizer", label: "Text Humanizer", icon: FileText },
-    { href: "/youtube-transcript", label: "YouTube Transcript", icon: Youtube },
-    { href: "/code-assistant", label: "Code Assistant", icon: Code },
-    { href: "/song-generator", label: "Song Generator", icon: Music },
+  const freeItems = [
+    { href: "/chat", label: "Chat", icon: MessageSquare, premium: false },
   ];
+
+  const premiumItems = [
+    { href: "/image-generator", label: "Image Generator", icon: ImageIcon, premium: true },
+    { href: "/text-humanizer", label: "Text Humanizer", icon: FileText, premium: true },
+    { href: "/youtube-transcript", label: "YouTube Transcript", icon: Youtube, premium: true },
+    { href: "/code-assistant", label: "Code Assistant", icon: Code, premium: true },
+    { href: "/song-generator", label: "Song Generator", icon: Music, premium: true },
+  ];
+
+  const allItems = [...freeItems, ...premiumItems];
 
   const SidebarNav = ({ onClick }: { onClick?: () => void }) => (
     <div className="flex flex-col h-full">
-      <div className="flex-1 p-4 space-y-1">
-        {navItems.map((item) => (
-          <Link
-            key={item.href}
-            href={item.href}
-            onClick={onClick}
-            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors ${
-              location === item.href
-                ? "bg-primary/10 text-primary font-medium"
-                : "hover:bg-accent text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            <item.icon className="w-5 h-5 shrink-0" />
-            <span>{item.label}</span>
-          </Link>
-        ))}
+      <div className="flex-1 p-3 space-y-0.5">
+        {allItems.map((item) => {
+          const isActive = location === item.href;
+          const isLocked = item.premium && !user;
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              onClick={onClick}
+              className={`flex items-center justify-between px-3 py-2.5 rounded-lg transition-colors group ${
+                isActive
+                  ? "bg-primary/10 text-primary font-medium"
+                  : "hover:bg-accent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <item.icon className="w-4 h-4 shrink-0" />
+                <span className="text-sm">{item.label}</span>
+              </div>
+              {isLocked && <Lock className="w-3 h-3 opacity-40" />}
+            </Link>
+          );
+        })}
+
+        {!user && (
+          <div className="mt-4 mx-1 p-3 rounded-xl bg-primary/5 border border-primary/10">
+            <div className="flex items-center gap-2 mb-2">
+              <Sparkles className="w-3.5 h-3.5 text-primary" />
+              <span className="text-xs font-semibold text-primary">Unlock Premium</span>
+            </div>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Sign in for images, code, songs & more.
+            </p>
+          </div>
+        )}
       </div>
       <div className="p-3 border-t border-border">
         <UserMenuButton />
@@ -188,10 +223,10 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex h-[100dvh] w-full bg-background overflow-hidden text-foreground">
-      <aside className="hidden md:flex flex-col w-64 border-r border-border bg-sidebar shrink-0">
+      <aside className="hidden md:flex flex-col w-60 border-r border-border bg-sidebar shrink-0">
         <div className="p-4 border-b border-border flex items-center gap-2">
           <img src={`${import.meta.env.BASE_URL}logo.svg`} className="w-7 h-7 rounded-lg" alt="NovaMind AI" />
-          <span className="font-bold text-base tracking-tight bg-gradient-to-r from-primary to-pink-500 bg-clip-text text-transparent">
+          <span className="font-bold text-sm tracking-tight bg-gradient-to-r from-primary to-pink-500 bg-clip-text text-transparent">
             NovaMind AI
           </span>
         </div>
@@ -199,18 +234,18 @@ function AppLayout({ children }: { children: React.ReactNode }) {
       </aside>
 
       <main className="flex-1 flex flex-col min-w-0 relative">
-        <div className="md:hidden p-4 flex items-center justify-between border-b border-border bg-background/80 backdrop-blur-md sticky top-0 z-10">
+        <div className="md:hidden p-3 flex items-center justify-between border-b border-border bg-background/80 backdrop-blur-md sticky top-0 z-10">
           <Sheet open={isSidebarOpen} onOpenChange={setIsSidebarOpen}>
             <SheetTrigger asChild>
               <Button variant="ghost" size="icon">
                 <Menu className="w-5 h-5" />
               </Button>
             </SheetTrigger>
-            <SheetContent side="left" className="w-64 p-0 flex flex-col">
+            <SheetContent side="left" className="w-60 p-0 flex flex-col">
               <div className="p-4 border-b border-border flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <img src={`${import.meta.env.BASE_URL}logo.svg`} className="w-6 h-6 rounded-md" alt="NovaMind AI" />
-                  <span className="font-bold">NovaMind AI</span>
+                  <span className="font-bold text-sm">NovaMind AI</span>
                 </div>
                 <Button variant="ghost" size="icon" onClick={() => setIsSidebarOpen(false)}>
                   <X className="w-4 h-4" />
@@ -221,7 +256,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
               </div>
             </SheetContent>
           </Sheet>
-          <span className="font-bold text-lg bg-gradient-to-r from-primary to-pink-500 bg-clip-text text-transparent">
+          <span className="font-bold text-base bg-gradient-to-r from-primary to-pink-500 bg-clip-text text-transparent">
             NovaMind AI
           </span>
           <div className="w-9" />
@@ -232,16 +267,20 @@ function AppLayout({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** Accessible to everyone — no sign-in required */
+function GuestRoute({ component: Component }: { component: React.ComponentType }) {
+  return <AppLayout><Component /></AppLayout>;
+}
+
+/** Requires sign-in — redirects to sign-in page if not authenticated */
 function ProtectedRoute({ component: Component }: { component: React.ComponentType }) {
   return (
     <>
       <Show when="signed-in">
-        <AppLayout>
-          <Component />
-        </AppLayout>
+        <AppLayout><Component /></AppLayout>
       </Show>
       <Show when="signed-out">
-        <Redirect to="/" />
+        <Redirect to="/sign-in" />
       </Show>
     </>
   );
@@ -250,12 +289,8 @@ function ProtectedRoute({ component: Component }: { component: React.ComponentTy
 function HomeRedirect() {
   return (
     <>
-      <Show when="signed-in">
-        <Redirect to="/chat" />
-      </Show>
-      <Show when="signed-out">
-        <LandingPage />
-      </Show>
+      <Show when="signed-in"><Redirect to="/chat" /></Show>
+      <Show when="signed-out"><LandingPage /></Show>
     </>
   );
 }
@@ -278,10 +313,7 @@ function SignUpPage() {
 
 function AppRoutes() {
   const [, setLocation] = useLocation();
-
-  useEffect(() => {
-    document.documentElement.classList.add("dark");
-  }, []);
+  useEffect(() => { document.documentElement.classList.add("dark"); }, []);
 
   return (
     <ClerkProvider
@@ -291,18 +323,8 @@ function AppRoutes() {
       signInUrl={`${basePath}/sign-in`}
       signUpUrl={`${basePath}/sign-up`}
       localization={{
-        signIn: {
-          start: {
-            title: "Welcome back",
-            subtitle: "Sign in to your NovaMind AI account",
-          },
-        },
-        signUp: {
-          start: {
-            title: "Create your account",
-            subtitle: "Start creating with NovaMind AI",
-          },
-        },
+        signIn: { start: { title: "Welcome back", subtitle: "Sign in to your NovaMind AI account" } },
+        signUp: { start: { title: "Create your account", subtitle: "Start creating with NovaMind AI" } },
       }}
       routerPush={(to) => setLocation(stripBase(to))}
       routerReplace={(to) => setLocation(stripBase(to), { replace: true })}
@@ -314,7 +336,9 @@ function AppRoutes() {
             <Route path="/" component={HomeRedirect} />
             <Route path="/sign-in/*?" component={SignInPage} />
             <Route path="/sign-up/*?" component={SignUpPage} />
-            <Route path="/chat" component={() => <ProtectedRoute component={ChatPage} />} />
+            {/* Chat is free — no sign-in required */}
+            <Route path="/chat" component={() => <GuestRoute component={ChatPage} />} />
+            {/* Premium features require sign-in */}
             <Route path="/image-generator" component={() => <ProtectedRoute component={ImageGeneratorPage} />} />
             <Route path="/text-humanizer" component={() => <ProtectedRoute component={TextHumanizerPage} />} />
             <Route path="/youtube-transcript" component={() => <ProtectedRoute component={YoutubeTranscriptPage} />} />
@@ -329,12 +353,10 @@ function AppRoutes() {
   );
 }
 
-function App() {
+export default function App() {
   return (
     <WouterRouter base={basePath}>
       <AppRoutes />
     </WouterRouter>
   );
 }
-
-export default App;
